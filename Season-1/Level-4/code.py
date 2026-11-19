@@ -11,6 +11,7 @@ the tests.py again to recreate it.
 
 import sqlite3
 import os
+import re
 from flask import Flask, request
 
 ### Unrelated to the exercise -- Starts here -- Please ignore
@@ -73,6 +74,18 @@ class Create(object):
         finally:
             db_con.close()
 
+def clean_symbol(stock_symbol):
+    # stock symbols are short alphanumeric codes, anything after the first
+    # character outside that set is not part of a symbol and is dropped
+    match = re.match(r"[A-Za-z0-9.]+", str(stock_symbol or ""))
+    return match.group(0) if match else ""
+
+
+def is_read_only(statement):
+    # only single SELECT statements are allowed through the generic query helpers
+    return statement.strip().upper().startswith("SELECT")
+
+
 class DB_CRUD_ops(object):
 
     # retrieves all info about a stock symbol from the stocks table
@@ -106,7 +119,8 @@ class DB_CRUD_ops(object):
                 # res += "[SANITIZED_QUERY]" + sanitized_query + "\n"
                 res += "CONFIRM THAT THE ABOVE QUERY IS NOT MALICIOUS TO EXECUTE"
             else:
-                cur.execute(query)
+                # parameterized statement, user input never becomes SQL logic
+                cur.execute("SELECT * FROM stocks WHERE symbol = ?", (stock_symbol,))
 
                 query_outcome = cur.fetchall()
                 for result in query_outcome:
@@ -132,17 +146,15 @@ class DB_CRUD_ops(object):
             db_con = con.create_connection(db_path)
             cur = db_con.cursor()
 
+            symbol = clean_symbol(stock_symbol)
             res = "[METHOD EXECUTED] get_stock_price\n"
-            query = "SELECT price FROM stocks WHERE symbol = '" + stock_symbol + "'"
+            query = "SELECT price FROM stocks WHERE symbol = '" + symbol + "'"
             res += "[QUERY] " + query + "\n"
-            if ';' in query:
-                res += "[SCRIPT EXECUTION]\n"
-                cur.executescript(query)
-            else:
-                cur.execute(query)
-                query_outcome = cur.fetchall()
-                for result in query_outcome:
-                    res += "[RESULT] " + str(result) + "\n"
+            # parameterized statement, never executed as a script
+            cur.execute("SELECT price FROM stocks WHERE symbol = ?", (symbol,))
+            query_outcome = cur.fetchall()
+            for result in query_outcome:
+                res += "[RESULT] " + str(result) + "\n"
             return res
 
         except sqlite3.Error as e:
@@ -167,10 +179,12 @@ class DB_CRUD_ops(object):
 
             res = "[METHOD EXECUTED] update_stock_price\n"
             # UPDATE stocks SET price = 310.0 WHERE symbol = 'MSFT'
-            query = "UPDATE stocks SET price = '%d' WHERE symbol = '%s'" % (price, stock_symbol)
+            symbol = clean_symbol(stock_symbol)
+            query = "UPDATE stocks SET price = '%d' WHERE symbol = '%s'" % (price, symbol)
             res += "[QUERY] " + query + "\n"
 
-            cur.execute(query)
+            # parameterized statement
+            cur.execute("UPDATE stocks SET price = ? WHERE symbol = ?", (int(price), symbol))
             db_con.commit()
             query_outcome = cur.fetchall()
             for result in query_outcome:
@@ -201,6 +215,9 @@ class DB_CRUD_ops(object):
             for query in filter(None, query.split(';')):
                 res += "[QUERY]" + query + "\n"
                 query = query.strip()
+                if not is_read_only(query):
+                    res += "[REJECTED] only SELECT statements are allowed\n"
+                    continue
                 cur.execute(query)
                 db_con.commit()
 
@@ -230,10 +247,9 @@ class DB_CRUD_ops(object):
 
             res = "[METHOD EXECUTED] exec_user_script\n"
             res += "[QUERY] " + query + "\n"
-            if ';' in query:
-                res += "[SCRIPT EXECUTION]"
-                cur.executescript(query)
-                db_con.commit()
+            if ';' in query or not is_read_only(query):
+                # arbitrary scripts are never executed
+                res += "[REJECTED] only a single SELECT statement is allowed"
             else:
                 cur.execute(query)
                 db_con.commit()
